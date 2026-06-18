@@ -19,12 +19,7 @@ struct ContentView: View {
                 // hairline. (A Tahoe floating glass sidebar was tried and
                 // rejected: with nothing but flat near-black behind it,
                 // glass has nothing to refract and reads as a gray slab.)
-                SidebarView()
-                    .frame(width: 244)
-                    .background(Theme.bgPane)
-                    .overlay(alignment: .trailing) {
-                        Rectangle().fill(Color.white.opacity(0.045)).frame(width: 1)
-                    }
+                ResizableSidebar()
                     .transition(.move(edge: .leading).combined(with: .opacity))
             }
 
@@ -76,6 +71,92 @@ struct ContentView: View {
         .sheet(isPresented: $store.settingsOpen) {
             GlintSettingsView()
                 .environmentObject(store)
+        }
+    }
+}
+
+// MARK: - Resizable sidebar
+
+/// Self-contained resizable sidebar: SidebarView + a drag handle on the
+/// trailing seam.
+///
+/// CRITICAL for flicker-free resizing: the LIVE drag width lives in this view's
+/// local `@State` (`dragWidth`), NOT on the global `@Published` WorkspaceStore.
+/// Mutating the store every drag frame would fire `objectWillChange` 60×/sec →
+/// re-render every store observer (the terminal's PaneSurfaceRepresentable
+/// re-runs `updateNSView` + the focus dance; ToolbarHeader's `.liquidGlass`
+/// NSVisualEffectView re-renders) → visible flicker in unrelated modules. By
+/// keeping the drag here, only THIS view re-renders during a drag; the sibling
+/// terminal/header just relayout via the layout pass (no body re-eval). The
+/// store is written exactly once, on drag end (which also persists it).
+private struct ResizableSidebar: View {
+    @EnvironmentObject var store: WorkspaceStore
+    /// Live width during an active drag; nil when idle → read persisted store.
+    @State private var dragWidth: Double?
+    /// Width snapshot at drag start (DragGesture.translation is cumulative, so
+    /// we add it to a fixed base instead of compounding).
+    @State private var dragBaseWidth: Double?
+    @State private var hovering = false
+
+    private var width: CGFloat { CGFloat(dragWidth ?? store.sidebarWidth) }
+
+    var body: some View {
+        SidebarView()
+            .frame(width: width)
+            .background(Theme.bgPane)
+            .overlay(alignment: .trailing) { handle }
+    }
+
+    private var handle: some View {
+        ZStack(alignment: .trailing) {
+            // The seam hairline — same near-invisible line as before, brighter
+            // and 1pt thicker while hovered (matching the pane divider).
+            Rectangle()
+                .fill(Color.white.opacity(hovering ? 0.18 : 0.045))
+                .frame(width: hovering ? 2 : 1)
+                .animation(.easeOut(duration: 0.12), value: hovering)
+
+            // Wide transparent grab strip straddling the seam.
+            Color.clear
+                .frame(width: 9)
+                .contentShape(Rectangle())
+                .offset(x: 4)
+                .onHover { inside in
+                    hovering = inside
+                    // NSCursor.resizeLeftRight is macOS 10.0+ (14.0 floor safe);
+                    // .pointerStyle would be macOS 15+ only.
+                    if inside { NSCursor.resizeLeftRight.push() } else { NSCursor.pop() }
+                }
+                .gesture(
+                    // `.global` coordinate space is essential: the handle is
+                    // anchored to the sidebar's trailing edge, so it MOVES as
+                    // the sidebar resizes. With the default `.local` space,
+                    // `translation` is measured against the gesture view's own
+                    // (now-moved) frame → a feedback loop that oscillates the
+                    // width ~10px/frame (the "twitch"). Global space measures
+                    // against the fixed screen origin, immune to the move.
+                    DragGesture(minimumDistance: 0, coordinateSpace: .global)
+                        .onChanged { value in
+                            let base = dragBaseWidth ?? store.sidebarWidth
+                            if dragBaseWidth == nil { dragBaseWidth = base }
+                            dragWidth = min(
+                                max(base + Double(value.translation.width),
+                                    WorkspaceStore.minSidebarWidth),
+                                WorkspaceStore.maxSidebarWidth)
+                        }
+                        .onEnded { _ in
+                            if let w = dragWidth { store.sidebarWidth = w }  // commit + persist ONCE
+                            dragWidth = nil
+                            dragBaseWidth = nil
+                        }
+                )
+                .onTapGesture(count: 2) {
+                    dragWidth = nil
+                    dragBaseWidth = nil
+                    withAnimation(.easeOut(duration: 0.18)) {
+                        store.sidebarWidth = WorkspaceStore.defaultSidebarWidth
+                    }
+                }
         }
     }
 }
