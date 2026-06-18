@@ -972,6 +972,7 @@ final class WorkspaceStore: ObservableObject {
             initialCwd: cwd,
             paneKey: paneKey,
             agentSocketPath: AgentBridge.shared.socketPath,
+            agentEventsPath: AgentBridge.shared.eventsPath,
             topAligned: topAligned,
             initialInput: restoreCommand
         )

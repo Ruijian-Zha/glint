@@ -34,6 +34,10 @@ final class GhosttySurfaceView: NSView, NSTextInputClient {
     /// starts at the divider, not 3 blank rows below it.
     private let topAligned: Bool
     private let agentSocketPath: String?
+    /// Append-only events file the shell hook writes to (zero-subprocess), set
+    /// into the pane env as $GLINT_AGENT_EVENTS. Preferred over the socket for
+    /// the shell reporter — see AgentBridge.eventsPath.
+    private let agentEventsPath: String?
     /// Optional text fed into the PTY as if typed by the user at the start of
     /// the session — ghostty handles the timing (waits until the shell is
     /// ready). Used to auto-resume `claude --continue` / `codex resume --last`
@@ -100,11 +104,13 @@ final class GhosttySurfaceView: NSView, NSTextInputClient {
          initialCwd: String? = nil,
          paneKey: String? = nil,
          agentSocketPath: String? = nil,
+         agentEventsPath: String? = nil,
          topAligned: Bool = true,
          initialInput: String? = nil) {
         self.initialCwd = initialCwd
         self.paneKey = paneKey
         self.agentSocketPath = agentSocketPath
+        self.agentEventsPath = agentEventsPath
         self.topAligned = topAligned
         self.initialInput = initialInput
         super.init(frame: frame)
@@ -303,6 +309,7 @@ final class GhosttySurfaceView: NSView, NSTextInputClient {
         var envPairs: [(UnsafeMutablePointer<CChar>, UnsafeMutablePointer<CChar>)] = []
         if let pk = paneKey { envPairs.append((strdup("GLINT_PANE_ID"), strdup(pk))) }
         if let sock = agentSocketPath { envPairs.append((strdup("GLINT_AGENT_SOCK"), strdup(sock))) }
+        if let ev = agentEventsPath, !ev.isEmpty { envPairs.append((strdup("GLINT_AGENT_EVENTS"), strdup(ev))) }
         defer { envPairs.forEach { free($0.0); free($0.1) } }
 
         // Reserve a top inset for the floating-island header when this pane
@@ -950,6 +957,42 @@ final class GhosttySurfaceView: NSView, NSTextInputClient {
                 }
             } else {
                 pasteClipboardText(into: s)
+            }
+            return
+        }
+        // ⌘+Return / ⌘+Enter → a plain Return. A trackpad gesture
+        // (BetterTouchTool two-finger tap) sends ⌘↩ to "submit", but embedded
+        // ghostty has no binding for it, so it's a dead key here. Re-dispatch
+        // it as a real Return so the gesture submits the line / agent prompt
+        // exactly like Enter. Only pure ⌘ — ⌘⇧↩ / ⌥↩ / ⌃↩ (agents' newline)
+        // are left alone. keyCode 36 = Return, 76 = numpad Enter.
+        if (event.keyCode == 36 || event.keyCode == 76),
+           mods.contains(.command),
+           !mods.contains(.shift), !mods.contains(.option), !mods.contains(.control),
+           !hasMarkedText() {
+            // Mirror the unmodified-Return side-effect (optimistic agent-status
+            // flip in WorkspaceStore.handlePaneReturn) so the sidebar updates
+            // the same way it would for a real Enter.
+            if let pk = paneKey {
+                NotificationCenter.default.post(
+                    name: .glintPaneReturnPressed, object: nil, userInfo: ["pane": pk])
+            }
+            // Synthesize a Command-free Return and send it through the normal
+            // key path so ghostty emits the correct CR for the current mode.
+            if let plain = NSEvent.keyEvent(
+                with: .keyDown, location: event.locationInWindow, modifierFlags: [],
+                timestamp: event.timestamp, windowNumber: event.windowNumber, context: nil,
+                characters: "\r", charactersIgnoringModifiers: "\r",
+                isARepeat: event.isARepeat, keyCode: event.keyCode) {
+                let handled = sendKey(plain, action: GHOSTTY_ACTION_PRESS, surface: s)
+                if !handled {                                   // fallback: inject CR directly
+                    var cr: UInt8 = 0x0D
+                    withUnsafePointer(to: &cr) { p in
+                        p.withMemoryRebound(to: CChar.self, capacity: 1) {
+                            ghostty_surface_text_input(s, $0, 1)
+                        }
+                    }
+                }
             }
             return
         }

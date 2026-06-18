@@ -316,26 +316,29 @@ enum AgentHookInstaller {
     }
 
     /// Pure POSIX sh — runs inside the pty so `$GLINT_PANE_ID` resolves.
-    /// Stays cheap (single `nc` send, swallows stdin).
+    ///
+    /// ZERO-SUBPROCESS by design: `printf >> file` is a shell builtin, so this
+    /// hook forks NOTHING and returns instantly. The previous version spawned
+    /// `nc` to write a Unix socket; that child stayed in the agent's process
+    /// group, the agent waited on it, and the delay dropped Claude Code's last
+    /// session line on exit — `claude --resume` lost the tail. Appending a line
+    /// to the file Glint tails removes the child entirely, so the agent's
+    /// session flush is never delayed. See
+    /// docs/reports/2026-06-18_claude-code-resume-tail-loss-DEEP.md.
     ///
     /// Argv[1] = hook event name (e.g. "PostToolUse").
-    /// Argv[2] = agent kind ("claude" or "codex"); defaults to "claude" so
-    /// existing Claude installs keep working without a script rewrite.
+    /// Argv[2] = agent kind ("claude" or "codex"); defaults to "claude".
     static let scriptBody: String = """
     #!/bin/sh
     # Glint CLI-agent hook reporter. Argv[1] = hook event, argv[2] = agent kind.
     [ -z "$GLINT_PANE_ID" ] && exit 0
-    [ -z "$GLINT_AGENT_SOCK" ] && exit 0
-    [ ! -S "$GLINT_AGENT_SOCK" ] && exit 0
-
+    [ -z "$GLINT_AGENT_EVENTS" ] && exit 0
     HOOK="${1:-Unknown}"
     AGENT="${2:-claude}"
-    # Drain stdin (claude/codex pass the hook payload there). We ignore it for
-    # now — only the hook name + agent are needed to drive pane state.
-    cat >/dev/null 2>&1
-
-    printf '{"pane":"%s","hook":"%s","agent":"%s"}\\n' "$GLINT_PANE_ID" "$HOOK" "$AGENT" \\
-      | nc -U -w 1 "$GLINT_AGENT_SOCK" >/dev/null 2>&1 || true
+    # One atomic append (the line is far under PIPE_BUF), so concurrent panes
+    # never interleave. No subprocess, no stdin read — returns to the agent in
+    # microseconds and never sits in its session-flush path.
+    printf '{"pane":"%s","hook":"%s","agent":"%s"}\\n' "$GLINT_PANE_ID" "$HOOK" "$AGENT" >> "$GLINT_AGENT_EVENTS" 2>/dev/null
     exit 0
     """
 
