@@ -39,3 +39,6 @@ sparkle_priv.key
 design/
 _design/
 .codegraph/
+
+# Scratch / local working dir (pickers, one-shot build scripts, etc.)
+tmp/

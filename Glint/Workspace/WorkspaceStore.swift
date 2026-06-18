@@ -316,6 +316,19 @@ extension Workspace {
         return Self.shortLabel(forCwd: cwd) ?? name
     }
 
+    /// The absolute on-disk path this workspace currently points at: the
+    /// focused pane's live working directory (polled ~1s, see WorkspaceStore
+    /// `pollFocusedCwds`), falling back to any pane that has one. Same
+    /// resolution as `displayName` but returns the raw absolute path instead
+    /// of the short label. nil until ghostty has reported a cwd for a pane —
+    /// the "Open in Cursor" affordance hides itself while this is nil.
+    var resolvedCwd: String? {
+        let cwd = (selectedTab?.focusedPane).flatMap { panes[$0]?.workingDirectory }
+            ?? panes.values.compactMap(\.workingDirectory).first
+        guard let cwd, !cwd.isEmpty else { return nil }
+        return cwd
+    }
+
     /// Label for a tab chip: the user's name if set, otherwise a short cwd
     /// label from the tab's focused pane, otherwise a generic fallback.
     func tabDisplayName(_ tab: WorkspaceTab) -> String {
@@ -1414,6 +1427,48 @@ final class WorkspaceStore: ObservableObject {
     func selectWorkspace(_ id: UUID) {
         selectedWorkspaceID = id
         acknowledgeCompletionIfNeeded(for: id)
+    }
+
+    /// Open a workspace's current folder in Cursor (falling back to VS Code,
+    /// then revealing in Finder). If the editor already has that folder open
+    /// it focuses the existing window; otherwise it opens a new one — that
+    /// "one window per folder" behavior is Cursor/VS Code's own, so we get it
+    /// for free by handing the folder to the app as a document to open.
+    ///
+    /// Uses `NSWorkspace.open(_:withApplicationAt:configuration:)` — the same
+    /// native API Glint already uses for OPEN_URL (GhosttyManager) — so it
+    /// needs no Automation entitlement / TCC prompt and spawns no subprocess.
+    func openInEditor(_ ws: Workspace) {
+        // Only a real, local, absolute directory is openable. A remote/ssh
+        // cwd or a path that doesn't exist on this Mac would create a phantom
+        // editor window, so bail (with a beep) instead.
+        guard let path = ws.resolvedCwd, path.hasPrefix("/") else { NSSound.beep(); return }
+        var isDir: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: path, isDirectory: &isDir),
+              isDir.boolValue else { NSSound.beep(); return }
+
+        let folder = URL(fileURLWithPath: path, isDirectory: true)
+        let editorBundleIDs = [
+            "com.todesktop.230313mzl4w4u92",   // Cursor (verified on this machine)
+            "com.microsoft.VSCode",
+            "com.microsoft.VSCodeInsiders",
+        ]
+        let workspace = NSWorkspace.shared
+        guard let appURL = editorBundleIDs.lazy
+            .compactMap({ workspace.urlForApplication(withBundleIdentifier: $0) })
+            .first else {
+            // No supported editor installed → reveal the folder in Finder.
+            workspace.activateFileViewerSelecting([folder])
+            return
+        }
+
+        let config = NSWorkspace.OpenConfiguration()
+        config.activates = true   // bring the editor to the front / focus it
+        workspace.open([folder], withApplicationAt: appURL, configuration: config) { _, error in
+            if error != nil {
+                DispatchQueue.main.async { workspace.activateFileViewerSelecting([folder]) }
+            }
+        }
     }
 
     /// Select the nth workspace in sidebar order (0-based). Used by the
