@@ -481,6 +481,20 @@ final class WorkspaceStore: ObservableObject {
         didSet { UserDefaults.standard.set(glassEffect, forKey: "glint.glassEffect") }
     }
 
+    /// Width of the workspace sidebar in points. Drag-resizable via the seam
+    /// handle in ContentView; clamped to [minSidebarWidth, maxSidebarWidth].
+    /// Default 244 matches the old hardcoded frame. Read via `object(forKey:)`
+    /// (not `double(forKey:)`, which returns 0.0 when unset → would collapse
+    /// the sidebar on first launch).
+    @Published var sidebarWidth: Double = {
+        (UserDefaults.standard.object(forKey: "glint.sidebarWidth") as? Double) ?? 244  // = defaultSidebarWidth
+    }() {
+        didSet { UserDefaults.standard.set(sidebarWidth, forKey: "glint.sidebarWidth") }
+    }
+    static let defaultSidebarWidth: Double = 244
+    static let minSidebarWidth: Double = 200
+    static let maxSidebarWidth: Double = 460
+
     /// UI accent color. Drives focus/selection highlights across the chrome
     /// (command palette selection bar, workspace switcher checkmark, Install
     /// buttons in Settings). Values: "indigo" | "cyan" | "pink" | "orange"
