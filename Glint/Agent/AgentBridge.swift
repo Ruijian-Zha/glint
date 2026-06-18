@@ -16,6 +16,17 @@ final class AgentBridge {
     private var acceptSource: DispatchSourceRead?
     private let queue = DispatchQueue(label: "glint.agent.bridge", qos: .utility)
 
+    /// Append-only NDJSON file the shell hook writes to. The shell reporter
+    /// uses this instead of the socket: a `printf >> file` is a pure shell
+    /// builtin (no subprocess), so it can't sit in the agent's process group
+    /// and delay Claude Code's session-file flush on exit — which a spawned
+    /// `nc` did, dropping the last message from `--resume`. The socket above
+    /// stays for the in-process OpenCode plugin (no child, no race).
+    private(set) var eventsPath: String = ""
+    private var eventsFD: Int32 = -1
+    private var eventsSource: DispatchSourceFileSystemObject?
+    private var eventsBuf = Data()
+
     private init() {}
 
     /// Bind + listen. Path is short on purpose (sun_path is 104 chars on Darwin).
@@ -104,6 +115,63 @@ final class AgentBridge {
         src.resume()
         acceptSource = src
         NSLog("[glint] agent bridge listening on \(path)")
+
+        #if DEBUG
+        let evPath = runDir.appendingPathComponent("agent-debug-events.ndjson").path
+        #else
+        let evPath = runDir.appendingPathComponent("agent-events.ndjson").path
+        #endif
+        startEventsFile(evPath)
+    }
+
+    /// Watch the append-only events file the shell hook writes to. Truncated
+    /// fresh each launch, then tailed via a vnode source: on every append we
+    /// read the new bytes and split complete lines into `handle(line:)` — the
+    /// same path the socket uses, so pane state is driven identically.
+    private func startEventsFile(_ path: String) {
+        // Create + truncate so each launch starts clean (a write fd we close).
+        let wfd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0o600)
+        if wfd >= 0 { close(wfd) } else {
+            NSLog("[glint] agent events file create failed: \(String(cString: strerror(errno)))")
+            return
+        }
+        let rfd = open(path, O_RDONLY)
+        guard rfd >= 0 else {
+            NSLog("[glint] agent events file open failed: \(String(cString: strerror(errno)))")
+            return
+        }
+        eventsFD = rfd
+        eventsPath = path
+        let src = DispatchSource.makeFileSystemObjectSource(
+            fileDescriptor: rfd, eventMask: [.write, .extend], queue: queue)
+        src.setEventHandler { [weak self] in self?.drainEventsFile() }
+        src.setCancelHandler { close(rfd) }
+        src.resume()
+        eventsSource = src
+        // A hook may have appended between truncate and watch — read once now,
+        // on the bridge queue so it can't race the source's handler.
+        queue.async { [weak self] in self?.drainEventsFile() }
+        NSLog("[glint] agent bridge tailing events file \(path)")
+    }
+
+    /// Read everything appended since last time and dispatch complete lines.
+    /// The read fd's position advances naturally across calls, so each append
+    /// is consumed exactly once. Runs on `queue`.
+    private func drainEventsFile() {
+        var tmp = [UInt8](repeating: 0, count: 8192)
+        while true {
+            let n = tmp.withUnsafeMutableBufferPointer { bp -> Int in
+                Darwin.read(eventsFD, bp.baseAddress, bp.count)
+            }
+            if n <= 0 { break }
+            eventsBuf.append(tmp, count: n)
+            if eventsBuf.count > (1 << 20) { eventsBuf.removeAll(keepingCapacity: true); break }
+        }
+        while let nl = eventsBuf.firstIndex(of: 0x0A) {
+            let line = eventsBuf.subdata(in: eventsBuf.startIndex..<nl)
+            eventsBuf.removeSubrange(eventsBuf.startIndex...nl)
+            if !line.isEmpty { handle(line: line) }
+        }
     }
 
     private func acceptOne() {
