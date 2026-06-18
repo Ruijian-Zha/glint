@@ -582,6 +582,10 @@ private struct WorkspaceCard: View {
     /// cards feel "liftable" without being a heavy hover state. Driven
     /// by `.onHover`; doesn't touch ghostty.
     @State private var isHovered: Bool = false
+    /// Local hover for the "open in Cursor" button so its squircle brightens
+    /// (faint → accent) when the pointer is directly over it, while the
+    /// card-level `isHovered` controls whether the button is revealed at all.
+    @State private var editorButtonHovered: Bool = false
     /// One-shot intensity for the green celebration when an agent's
     /// `.justCompleted` arrives: blooms 0 → 1 in ~0.12s, then exhales back
     /// to 0 over ~0.95s (the halo drifts outward as it fades). Re-armed
@@ -626,6 +630,9 @@ private struct WorkspaceCard: View {
                 secondaryRow(summary: summary, active: active)
             }
             Spacer(minLength: 0)
+            if !archived {
+                openInEditorButton
+            }
         }
         .padding(8)
         .background(cardBackground(active: active))
@@ -687,6 +694,13 @@ private struct WorkspaceCard: View {
                     store.deleteWorkspace(ws.id)
                 }
             } else {
+                Button {
+                    store.openInEditor(ws)
+                } label: {
+                    Label("Open in Cursor", systemImage: "chevron.left.forwardslash.chevron.right")
+                }
+                .disabled(ws.resolvedCwd == nil)
+                Divider()
                 Button("Rename") { startEditing() }
                 Button("New Workspace") { store.addWorkspace() }
                 Divider()
@@ -739,6 +753,41 @@ private struct WorkspaceCard: View {
 
     private func cancelRename() {
         isEditing = false
+    }
+
+    /// "Open in Cursor" affordance (variation A2): a 28pt squircle holding a
+    /// 15pt code glyph, sitting on the card's trailing edge. Revealed only on
+    /// card hover (opacity-gated so the slot is always allocated and the name
+    /// never reflows), and brightens faint → accent when the pointer is over
+    /// it. As a real Button it consumes its own click, so opening the editor
+    /// does NOT also fire the card's select tap. Hidden until ghostty reports
+    /// a cwd; the same action is exposed accessibly via the context menu.
+    @ViewBuilder
+    private var openInEditorButton: some View {
+        if ws.resolvedCwd != nil {
+            Button {
+                store.openInEditor(ws)
+            } label: {
+                Image(systemName: "chevron.left.forwardslash.chevron.right")
+                    .font(.system(size: 15, weight: .medium))
+                    .foregroundStyle(editorButtonHovered ? Theme.accentBright : Theme.text2)
+                    .frame(width: 28, height: 28)
+                    .background(
+                        RoundedRectangle(cornerRadius: 7, style: .continuous)
+                            .fill(editorButtonHovered
+                                  ? Theme.accent.opacity(0.22)
+                                  : Color.white.opacity(0.06))
+                    )
+                    .contentShape(RoundedRectangle(cornerRadius: 7, style: .continuous))
+            }
+            .buttonStyle(.plain)
+            .onHover { editorButtonHovered = $0 }
+            .help("Open in Cursor")
+            .accessibilityHidden(true)   // card is a combined a11y element; context menu carries the action
+            .opacity(isHovered ? 1 : 0)
+            .allowsHitTesting(isHovered)
+            .animation(.easeOut(duration: 0.16), value: isHovered)
+        }
     }
 
     private func workspaceIcon(active: Bool, status: PaneAgentStatus?) -> some View {

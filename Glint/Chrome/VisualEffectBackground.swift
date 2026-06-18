@@ -153,6 +153,13 @@ struct LiquidGlassSurface<Fallback: View>: ViewModifier {
     @ViewBuilder let fallback: () -> Fallback
 
     func body(content: Content) -> some View {
+        // `Glass` / `.glassEffect` only exist in the macOS 26 SDK (Xcode 26+,
+        // Swift 6.2). `@available` gates runtime, but the SYMBOL must still
+        // exist at compile time — so on an older Xcode (Swift < 6.2) we
+        // compile-time-exclude the Liquid Glass branch and use the pre-26
+        // fallbacks. This Mac (macOS 15) never runs the glass branch anyway;
+        // building with Xcode 26 restores it automatically.
+#if compiler(>=6.2)
         if #available(macOS 26.0, *), enabled {
             content.glassEffect(
                 glass,
@@ -163,8 +170,16 @@ struct LiquidGlassSurface<Fallback: View>: ViewModifier {
         } else {
             content.background(fallback())
         }
+#else
+        if enabled && autoCapsule {
+            content.background(GlassCapsuleFallback(cornerRadius: cornerRadius, tint: tint))
+        } else {
+            content.background(fallback())
+        }
+#endif
     }
 
+#if compiler(>=6.2)
     @available(macOS 26.0, *)
     private var glass: Glass {
         var g: Glass = .regular
@@ -172,6 +187,7 @@ struct LiquidGlassSurface<Fallback: View>: ViewModifier {
         if interactive { g = g.interactive() }
         return g
     }
+#endif
 }
 
 extension View {
