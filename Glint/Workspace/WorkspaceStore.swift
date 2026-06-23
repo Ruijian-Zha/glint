@@ -891,6 +891,7 @@ final class WorkspaceStore: ObservableObject {
 
         // Boot the CLI-agent IPC channel and route hook events into pane state.
         AgentBridge.shared.start()
+        ControlBridge.shared.start()
         Self.autoInstallAgentHooksOnFirstLaunch(socketPath: AgentBridge.shared.socketPath)
         self.claudeHooksInstalled = AgentHookInstaller.isInstalled()
         self.codexHooksInstalled = CodexHookInstaller.isInstalled()
@@ -933,6 +934,12 @@ final class WorkspaceStore: ObservableObject {
         let pane: PaneID
     }
 
+    /// One-shot first-mint command for a programmatically-spawned pane
+    /// (ControlBridge → spawnWorker). Takes precedence over the auto-resume
+    /// command in `surfaceView`; consumed on first read so a later re-mint
+    /// (archive/unarchive, app restart) doesn't replay the worker's launch.
+    private var pendingFirstInput: [WorkspacePaneKey: String] = [:]
+
     func surfaceView(workspaceID: UUID, paneID: PaneID, cwd: String?) -> GhosttySurfaceView {
         let key = WorkspacePaneKey(workspace: workspaceID, pane: paneID)
         if let v = surfaceViews[key] { return v }
@@ -967,6 +974,10 @@ final class WorkspaceStore: ObservableObject {
             default: return nil
             }
         }()
+        // A programmatically-spawned worker (ControlBridge → spawnWorker) carries
+        // an explicit first command that wins over auto-resume. One-shot: removed
+        // on read so an archive/unarchive re-mint doesn't replay the launch.
+        let firstInput = pendingFirstInput.removeValue(forKey: key) ?? restoreCommand
         let v = GhosttySurfaceView(
             frame: .zero,
             initialCwd: cwd,
@@ -974,7 +985,7 @@ final class WorkspaceStore: ObservableObject {
             agentSocketPath: AgentBridge.shared.socketPath,
             agentEventsPath: AgentBridge.shared.eventsPath,
             topAligned: topAligned,
-            initialInput: restoreCommand
+            initialInput: firstInput
         )
         surfaceViews[key] = v
         return v
@@ -1761,6 +1772,30 @@ final class WorkspaceStore: ObservableObject {
         let ws = Workspace.fresh(name: "New workspace", accentHex: pick.0, symbol: pick.1)
         workspaces.append(ws)
         selectedWorkspaceID = ws.id
+    }
+
+    /// Programmatic workspace creation for the orchestrator→worker flow
+    /// (ControlBridge). Creates a named workspace whose single pane opens in
+    /// `cwd` and runs `initialInput` once the shell is ready (the worker's
+    /// forked-claude launch command, fed via ghostty `initial_input` exactly
+    /// like the auto-resume path). Returns the new workspace + pane ids so the
+    /// caller can track the worker. `name` is treated as user-chosen so the
+    /// sidebar shows it verbatim instead of a cwd-derived label.
+    @discardableResult
+    func spawnWorker(name: String, cwd: String, initialInput: String) -> (UUID, PaneID) {
+        let palette = [
+            ("5E5CE6", "•"), ("FF6582", "•"), ("30D158", "•"),
+            ("FF9F0A", "•"), ("64D2FF", "•"), ("BF5AF2", "•"),
+        ]
+        let pick = palette[workspaces.count % palette.count]
+        var ws = Workspace.fresh(name: name, accentHex: pick.0, symbol: "W")
+        ws.userNamed = true
+        let firstPane = ws.tabs[0].focusedPane
+        ws.panes[firstPane]?.workingDirectory = cwd
+        pendingFirstInput[WorkspacePaneKey(workspace: ws.id, pane: firstPane)] = initialInput
+        workspaces.append(ws)
+        selectedWorkspaceID = ws.id
+        return (ws.id, firstPane)
     }
 
     // MARK: tree ops
